@@ -130,6 +130,12 @@ pub const ConversationContext = struct {
     peer_id: ?[]const u8 = null,
     group_id: ?[]const u8 = null,
     is_group: ?bool = null,
+    // Trusted Vee Discord ingress metadata, populated only by the validated
+    // inbound gateway path and never from model-controlled tool arguments.
+    vee_guild_id: ?[]const u8 = null,
+    vee_channel_id: ?[]const u8 = null,
+    vee_thread_id: ?[]const u8 = null,
+    vee_message_id: ?[]const u8 = null,
 
     /// Compute a hash fingerprint of sender-identifying fields so the system
     /// prompt can be rebuilt when the *sender* changes, not just when context
@@ -161,6 +167,10 @@ pub fn buildConversationContext(args: ConversationContext) ?ConversationContext 
     const sender_display_name = normalizeOptionalString(args.sender_display_name);
     const delivery_chat_id = normalizeOptionalString(args.delivery_chat_id);
     const peer_id = normalizeOptionalString(args.peer_id);
+    const vee_guild_id = normalizeOptionalString(args.vee_guild_id);
+    const vee_channel_id = normalizeOptionalString(args.vee_channel_id);
+    const vee_thread_id = normalizeOptionalString(args.vee_thread_id);
+    const vee_message_id = normalizeOptionalString(args.vee_message_id);
     const is_group = args.is_group;
     const group_id = if (normalizeOptionalString(args.group_id)) |value|
         value
@@ -188,6 +198,10 @@ pub fn buildConversationContext(args: ConversationContext) ?ConversationContext 
         .sender_username = sender_username,
         .sender_display_name = sender_display_name,
         .delivery_chat_id = delivery_chat_id,
+        .vee_guild_id = vee_guild_id,
+        .vee_channel_id = vee_channel_id,
+        .vee_thread_id = vee_thread_id,
+        .vee_message_id = vee_message_id,
         .peer_id = peer_id,
         .group_id = group_id,
         .is_group = is_group,

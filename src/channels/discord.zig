@@ -43,6 +43,7 @@ pub const DiscordChannel = struct {
     allocator: std.mem.Allocator,
     token: []const u8,
     guild_id: ?[]const u8,
+    channel_id: ?[]const u8 = null,
     allow_bots: bool,
     account_id: []const u8 = "default",
 
@@ -122,6 +123,7 @@ pub const DiscordChannel = struct {
             .allocator = allocator,
             .token = cfg.token,
             .guild_id = cfg.guild_id,
+            .channel_id = cfg.channel_id,
             .allow_bots = cfg.allow_bots,
             .account_id = cfg.account_id,
             .allow_from = cfg.allow_from,
@@ -1234,6 +1236,15 @@ pub const DiscordChannel = struct {
             return;
         };
 
+        const message_id: ?[]const u8 = if (d_obj.get("id")) |v| switch (v) {
+            .string => |s| s,
+            else => null,
+        } else null;
+        const channel_type: ?i64 = if (d_obj.get("channel_type")) |v| switch (v) {
+            .integer => |value| value,
+            else => null,
+        } else null;
+
         // Extract content
         const content: []const u8 = if (d_obj.get("content")) |v| switch (v) {
             .string => |s| s,
@@ -1287,6 +1298,24 @@ pub const DiscordChannel = struct {
             .bool => |b| b,
             else => false,
         } else false;
+
+        // A configured channel_id turns this account into the Vee ingress. Its
+        // provenance must be complete before any message reaches a model.
+        if (self.channel_id) |expected_channel_id| {
+            const expected_guild_id = self.guild_id orelse return;
+            if (guild_id == null or message_id == null or channel_type == null or channel_type.? != 0) return;
+            if (self.allow_from.len != 1 or std.mem.eql(u8, self.allow_from[0], "*")) return;
+            if (!std.mem.eql(u8, guild_id.?, expected_guild_id) or
+                !std.mem.eql(u8, channel_id, expected_channel_id) or
+                !std.mem.eql(u8, author_id, self.allow_from[0]) or
+                std.mem.trim(u8, content, " \t\r\n").len == 0)
+            {
+                return;
+            }
+            if (d_obj.get("attachments")) |attachments| {
+                if (attachments == .array and attachments.array.items.len != 0) return;
+            }
+        }
 
         // Filter 1: bot author
         if (author_is_bot and !self.allow_bots) {
@@ -1378,6 +1407,15 @@ pub const DiscordChannel = struct {
             try mw.writeAll(",\"guild_id\":");
             try root.appendJsonStringW(mw, gid);
         }
+        if (self.channel_id != null) {
+            const trusted_message_id = message_id orelse return;
+            try mw.writeAll(",\"channel_id\":");
+            try root.appendJsonStringW(mw, channel_id);
+            try mw.writeAll(",\"thread_id\":");
+            try root.appendJsonStringW(mw, channel_id);
+            try mw.writeAll(",\"message_id\":");
+            try root.appendJsonStringW(mw, trusted_message_id);
+        }
         if (author_username) |uname| {
             try mw.writeAll(",\"sender_username\":");
             try root.appendJsonStringW(mw, uname);
@@ -1412,6 +1450,9 @@ pub const DiscordChannel = struct {
     }
 
     fn handleInteractionCreate(self: *DiscordChannel, root_val: std.json.Value) !void {
+        // Vee accepts only text MESSAGE_CREATE events. Buttons/components cannot
+        // acquire a trusted ingress envelope.
+        if (self.channel_id != null) return;
         if (root_val != .object) return;
         const d_val = root_val.object.get("d") orelse return;
         const d_obj = switch (d_val) {
@@ -1844,6 +1885,59 @@ test "discord handleMessageCreate publishes inbound guild message with metadata"
     try std.testing.expectEqualStrings("g-1", meta.value.object.get("guild_id").?.string);
     try std.testing.expectEqualStrings("discord-user", meta.value.object.get("sender_username").?.string);
     try std.testing.expectEqualStrings("Discord User", meta.value.object.get("sender_display_name").?.string);
+}
+
+test "discord Vee ingress accepts only configured text messages" {
+    const alloc = std.testing.allocator;
+    var event_bus = bus_mod.Bus.init();
+    defer event_bus.close();
+    var ch = DiscordChannel.initFromConfig(alloc, .{
+        .account_id = "vee",
+        .token = "token",
+        .guild_id = "g-1",
+        .channel_id = "c-1",
+        .allow_from = &.{"u-1"},
+    });
+    ch.setBus(&event_bus);
+
+    const allowed =
+        \\{"d":{"id":"m-1","channel_id":"c-1","channel_type":0,"guild_id":"g-1","content":"hello","author":{"id":"u-1","bot":false}}}
+    ;
+    const allowed_parsed = try std.json.parseFromSlice(std.json.Value, alloc, allowed, .{});
+    defer allowed_parsed.deinit();
+    try ch.handleMessageCreate(allowed_parsed.value);
+    var inbound = event_bus.consumeInbound() orelse return error.TestExpectedEqual;
+    defer inbound.deinit(alloc);
+    const metadata = try std.json.parseFromSlice(std.json.Value, alloc, inbound.metadata_json.?, .{});
+    defer metadata.deinit();
+    try std.testing.expectEqualStrings("c-1", metadata.value.object.get("channel_id").?.string);
+    try std.testing.expectEqualStrings("c-1", metadata.value.object.get("thread_id").?.string);
+    try std.testing.expectEqualStrings("m-1", metadata.value.object.get("message_id").?.string);
+
+    const rejected = [_][]const u8{
+        \\{"d":{"id":"m-2","channel_id":"c-1","channel_type":0,"content":"dm","author":{"id":"u-1","bot":false}}}
+        ,
+        \\{"d":{"id":"m-3","channel_id":"other","channel_type":0,"guild_id":"g-1","content":"wrong channel","author":{"id":"u-1","bot":false}}}
+        ,
+        \\{"d":{"id":"m-4","channel_id":"c-1","channel_type":11,"guild_id":"g-1","content":"thread","author":{"id":"u-1","bot":false}}}
+        ,
+        \\{"d":{"id":"m-5","channel_id":"c-1","channel_type":0,"guild_id":"g-1","content":"wrong user","author":{"id":"u-2","bot":false}}}
+        ,
+        \\{"d":{"channel_id":"c-1","channel_type":0,"guild_id":"g-1","content":"missing id","author":{"id":"u-1","bot":false}}}
+        ,
+        \\{"d":{"id":"m-6","channel_id":"c-1","channel_type":0,"guild_id":"g-1","content":"attachment","attachments":[{"url":"https://example.invalid/a"}],"author":{"id":"u-1","bot":false}}}
+        ,
+    };
+    for (rejected) |payload| {
+        const parsed = try std.json.parseFromSlice(std.json.Value, alloc, payload, .{});
+        defer parsed.deinit();
+        try ch.handleMessageCreate(parsed.value);
+        try std.testing.expectEqual(@as(usize, 0), event_bus.inboundDepth());
+    }
+    const interaction = try std.json.parseFromSlice(std.json.Value, alloc, "{\"d\":{}}", .{});
+    defer interaction.deinit();
+    try ch.handleInteractionCreate(interaction.value);
+    try std.testing.expectEqual(@as(usize, 0), event_bus.inboundDepth());
 }
 
 test "discord handleMessageCreate empty allow_from denies inbound message" {

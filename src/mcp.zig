@@ -5,6 +5,8 @@
 
 const std = @import("std");
 const std_compat = @import("compat");
+const builtin = @import("builtin");
+const fs_compat = @import("fs_compat.zig");
 const tools_mod = @import("tools/root.zig");
 const config_mod = @import("config.zig");
 const json_util = @import("json_util.zig");
@@ -19,6 +21,33 @@ const Allocator = std.mem.Allocator;
 const log = std.log.scoped(.mcp);
 
 pub const McpServerConfig = config_mod.McpServerConfig;
+
+pub const VeeIngress = struct {
+    guild_id: []const u8,
+    channel_id: []const u8,
+    thread_id: []const u8,
+    sender_id: []const u8,
+    message_id: []const u8,
+};
+
+threadlocal var tls_vee_ingress: ?VeeIngress = null;
+
+pub fn setVeeIngressContext(ingress: ?VeeIngress) ?VeeIngress {
+    const previous = tls_vee_ingress;
+    tls_vee_ingress = ingress;
+    return previous;
+}
+
+pub fn currentVeeIngressContext() ?VeeIngress {
+    return tls_vee_ingress;
+}
+
+pub fn hasVeeIngressServer(configs: []const McpServerConfig) bool {
+    for (configs) |cfg| {
+        if (cfg.vee_ingress_proof_file != null) return true;
+    }
+    return false;
+}
 
 // ── Tool definition from server ─────────────────────────────────
 
@@ -429,6 +458,98 @@ pub fn parseCallToolResponse(allocator: Allocator, resp: []const u8) ![]const u8
     return output.toOwnedSlice(allocator);
 }
 
+fn validVeeIngressText(value: []const u8) bool {
+    return value.len > 0 and value.len <= 256 and std.mem.indexOfAny(u8, value, "\r\n") == null;
+}
+
+fn buildVeeIngressArguments(
+    allocator: Allocator,
+    model_args_json: []const u8,
+    proof: []const u8,
+    ingress: VeeIngress,
+    issued_at: i64,
+    nonce: []const u8,
+) ![]u8 {
+    if (!validVeeIngressText(ingress.guild_id) or
+        !validVeeIngressText(ingress.channel_id) or
+        !validVeeIngressText(ingress.thread_id) or
+        !validVeeIngressText(ingress.sender_id) or
+        !validVeeIngressText(ingress.message_id) or
+        !validVeeIngressText(nonce) or
+        !std.mem.eql(u8, ingress.thread_id, ingress.channel_id))
+    {
+        return error.InvalidVeeIngress;
+    }
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, model_args_json, .{});
+    defer parsed.deinit();
+    if (parsed.value != .object) return error.InvalidVeeIngressArguments;
+    _ = parsed.value.object.orderedRemove("__vee_ingress");
+    const clean_args = try std.json.Stringify.valueAlloc(allocator, parsed.value, .{});
+    defer allocator.free(clean_args);
+    if (clean_args.len < 2 or clean_args[0] != '{' or clean_args[clean_args.len - 1] != '}') {
+        return error.InvalidVeeIngressArguments;
+    }
+
+    const payload = try std.fmt.allocPrint(
+        allocator,
+        "1\ndiscord\nmessage_create\n{s}\n{s}\n{s}\n{s}\n{s}\n{d}\n{s}",
+        .{ ingress.guild_id, ingress.channel_id, ingress.thread_id, ingress.sender_id, ingress.message_id, issued_at, nonce },
+    );
+    defer allocator.free(payload);
+    const HmacSha256 = std.crypto.auth.hmac.sha2.HmacSha256;
+    var mac: [HmacSha256.mac_length]u8 = undefined;
+    HmacSha256.create(&mac, payload, proof);
+    const signature = std.fmt.bytesToHex(mac, .lower);
+    const envelope = try std.json.Stringify.valueAlloc(allocator, .{
+        .version = @as(i64, 1),
+        .provider = "discord",
+        .event_type = "message_create",
+        .guild_id = ingress.guild_id,
+        .channel_id = ingress.channel_id,
+        .thread_id = ingress.thread_id,
+        .sender_id = ingress.sender_id,
+        .message_id = ingress.message_id,
+        .issued_at = issued_at,
+        .nonce = nonce,
+        .signature = signature[0..],
+    }, .{});
+    defer allocator.free(envelope);
+    const separator: []const u8 = if (clean_args.len == 2) "" else ",";
+    return std.fmt.allocPrint(
+        allocator,
+        "{s}{s}\"__vee_ingress\":{s}}}",
+        .{ clean_args[0 .. clean_args.len - 1], separator, envelope },
+    );
+}
+
+fn signVeeIngressArguments(
+    allocator: Allocator,
+    model_args_json: []const u8,
+    proof_file: []const u8,
+    ingress: VeeIngress,
+) ![]u8 {
+    const stat = try fs_compat.statPath(proof_file);
+    if (builtin.os.tag != .windows and (stat.mode & 0o077) != 0) {
+        return error.InsecureVeeIngressProofFile;
+    }
+    const proof_file_contents = try fs_compat.readFileAlloc(std_compat.fs.cwd(), allocator, proof_file, 4096);
+    defer allocator.free(proof_file_contents);
+    const proof = std.mem.trim(u8, proof_file_contents, " \t\r\n");
+    if (proof.len == 0) return error.EmptyVeeIngressProofFile;
+    var random: [16]u8 = undefined;
+    std_compat.crypto.random.bytes(&random);
+    const nonce = std.fmt.bytesToHex(random, .lower);
+    return buildVeeIngressArguments(
+        allocator,
+        model_args_json,
+        proof,
+        ingress,
+        std_compat.time.timestamp(),
+        nonce[0..],
+    );
+}
+
 // ── McpToolWrapper — adapts MCP tool to Tool vtable ─────────────
 
 pub const McpToolWrapper = struct {
@@ -459,7 +580,15 @@ pub const McpToolWrapper = struct {
         const args_json = std.json.Stringify.valueAlloc(allocator, json_val, .{}) catch
             return tools_mod.ToolResult.fail("Failed to serialize tool arguments");
         defer allocator.free(args_json);
-        const output = self.server.callTool(self.original_name, args_json) catch |err| {
+        var signed_args: ?[]u8 = null;
+        defer if (signed_args) |value| allocator.free(value);
+        const call_args = if (self.server.config.vee_ingress_proof_file) |proof_file| blk: {
+            const ingress = tls_vee_ingress orelse return tools_mod.ToolResult.fail("Vee ingress context is unavailable");
+            signed_args = signVeeIngressArguments(allocator, args_json, proof_file, ingress) catch
+                return tools_mod.ToolResult.fail("Vee ingress signing failed");
+            break :blk signed_args.?;
+        } else args_json;
+        const output = self.server.callTool(self.original_name, call_args) catch |err| {
             const msg = std.fmt.allocPrint(allocator, "MCP tool '{s}' failed: {}", .{ self.original_name, err }) catch
                 return tools_mod.ToolResult.fail("MCP tool call failed");
             return tools_mod.ToolResult{ .success = false, .output = "", .error_msg = msg };
@@ -796,6 +925,63 @@ test "McpToolWrapper vtable parameters_json" {
     };
     const t = wrapper.tool();
     try std.testing.expectEqualStrings("{\"type\":\"object\"}", t.parametersJson());
+}
+
+test "Vee ingress overwrites forged model envelope with Go-compatible HMAC" {
+    const ingress = VeeIngress{
+        .guild_id = "guild-1",
+        .channel_id = "channel-1",
+        .thread_id = "channel-1",
+        .sender_id = "user-1",
+        .message_id = "message-1",
+    };
+    const rendered = try buildVeeIngressArguments(
+        std.testing.allocator,
+        "{\"repository\":\"jjsizemore/syncvia\",\"__vee_ingress\":{\"signature\":\"forged\"}}",
+        "proof-secret",
+        ingress,
+        1_700_000_000,
+        "nonce-1",
+    );
+    defer std.testing.allocator.free(rendered);
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, rendered, .{});
+    defer parsed.deinit();
+    const envelope_value = parsed.value.object.get("__vee_ingress") orelse return error.TestExpectedEqual;
+    try std.testing.expect(envelope_value == .object);
+    const envelope = envelope_value.object;
+    try std.testing.expectEqual(@as(i64, 1), envelope.get("version").?.integer);
+    try std.testing.expectEqualStrings("discord", envelope.get("provider").?.string);
+    try std.testing.expectEqualStrings("message_create", envelope.get("event_type").?.string);
+    try std.testing.expectEqualStrings("channel-1", envelope.get("thread_id").?.string);
+    try std.testing.expectEqualStrings("d6712a297a5432324b53fc538bfa8c4ab121a8d0c7ea477bf04a7eb658c50deb", envelope.get("signature").?.string);
+}
+
+test "Vee ingress proof file requires private permissions" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const tmp_dir = std_compat.fs.Dir.wrap(tmp.dir);
+    try tmp_dir.writeFile(.{ .sub_path = "proof", .data = "proof-secret" });
+    var file = try tmp_dir.openFile("proof", .{ .mode = .read_write });
+    defer file.close();
+    const path = try tmp_dir.realpathAlloc(std.testing.allocator, "proof");
+    defer std.testing.allocator.free(path);
+    const ingress = VeeIngress{
+        .guild_id = "guild-1",
+        .channel_id = "channel-1",
+        .thread_id = "channel-1",
+        .sender_id = "user-1",
+        .message_id = "message-1",
+    };
+    try file.chmod(@as(std_compat.fs.File.Mode, 0o644));
+    try std.testing.expectError(
+        error.InsecureVeeIngressProofFile,
+        signVeeIngressArguments(std.testing.allocator, "{}", path, ingress),
+    );
+    try file.chmod(@as(std_compat.fs.File.Mode, 0o600));
+    const signed = try signVeeIngressArguments(std.testing.allocator, "{}", path, ingress);
+    defer std.testing.allocator.free(signed);
+    try std.testing.expect(std.mem.indexOf(u8, signed, "__vee_ingress") != null);
 }
 
 test "initMcpTools empty configs" {

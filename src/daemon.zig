@@ -27,6 +27,7 @@ const heartbeat_mod = @import("heartbeat.zig");
 const inbound_debounce = @import("inbound_debounce.zig");
 const interaction_choices = @import("interactions/choices.zig");
 const memory_mod = @import("memory/root.zig");
+const mcp = @import("mcp.zig");
 const outbound = @import("outbound.zig");
 const bootstrap_mod = @import("bootstrap/root.zig");
 const onboard = @import("onboard.zig");
@@ -721,6 +722,46 @@ fn parseInboundMetadata(allocator: std.mem.Allocator, metadata_json: ?[]const u8
     return parsed;
 }
 
+fn validVeeIngressText(value: []const u8) bool {
+    return value.len > 0 and value.len <= 256 and std.mem.indexOfAny(u8, value, "\r\n") == null;
+}
+
+fn veeIngressForMessage(
+    config: *const Config,
+    msg: *const bus_mod.InboundMessage,
+    meta: channel_adapters.InboundMetadata,
+) ?mcp.VeeIngress {
+    if (!std.mem.eql(u8, msg.channel, "discord") or (meta.is_dm orelse true)) return null;
+    if (config.channels.discord.len != 1) return null;
+    const discord_cfg = config.channels.discord[0];
+    const expected_guild_id = discord_cfg.guild_id orelse return null;
+    const expected_channel_id = discord_cfg.channel_id orelse return null;
+    if (discord_cfg.allow_from.len != 1 or std.mem.eql(u8, discord_cfg.allow_from[0], "*")) return null;
+    const guild_id = meta.guild_id orelse return null;
+    const channel_id = meta.channel_id orelse return null;
+    const thread_id = meta.thread_id orelse return null;
+    const message_id = meta.message_id orelse return null;
+    if (!validVeeIngressText(guild_id) or
+        !validVeeIngressText(channel_id) or
+        !validVeeIngressText(thread_id) or
+        !validVeeIngressText(msg.sender_id) or
+        !validVeeIngressText(message_id) or
+        !std.mem.eql(u8, guild_id, expected_guild_id) or
+        !std.mem.eql(u8, channel_id, expected_channel_id) or
+        !std.mem.eql(u8, thread_id, expected_channel_id) or
+        !std.mem.eql(u8, msg.sender_id, discord_cfg.allow_from[0]))
+    {
+        return null;
+    }
+    return .{
+        .guild_id = guild_id,
+        .channel_id = channel_id,
+        .thread_id = thread_id,
+        .sender_id = msg.sender_id,
+        .message_id = message_id,
+    };
+}
+
 fn buildInboundConversationContext(
     msg: *const bus_mod.InboundMessage,
     meta: channel_adapters.InboundMetadata,
@@ -1289,6 +1330,16 @@ fn processInboundMessage(
 
     var routing_plan = buildInboundRoutingPlan(allocator, runtime.config, msg, parsed_meta.fields);
     defer routing_plan.deinit(allocator);
+
+    if (mcp.hasVeeIngressServer(runtime.config.mcp_servers)) {
+        const ingress = veeIngressForMessage(runtime.config, msg, parsed_meta.fields) orelse return;
+        if (routing_plan.conversation_context) |*context| {
+            context.vee_guild_id = ingress.guild_id;
+            context.vee_channel_id = ingress.channel_id;
+            context.vee_thread_id = ingress.thread_id;
+            context.vee_message_id = ingress.message_id;
+        } else return;
+    }
 
     const outbound_channel = resolveOutboundChannel(registry, routing_plan.outbound_channel, routing_plan.outbound_account_id);
     if (outbound_channel) |channel| {
@@ -3628,4 +3679,35 @@ test "markError records AddressInUse for gateway component" {
     try std.testing.expect(!state.components[0].?.running);
     try std.testing.expectEqual(@as(u64, 1), state.components[0].?.restart_count);
     try std.testing.expectEqualStrings("AddressInUse", state.components[0].?.last_error.?);
+}
+
+test "Vee ingress accepts Discord session chat key" {
+    const allow_from = [_][]const u8{"user-1"};
+    const discord = [_]@import("config_types.zig").DiscordConfig{.{
+        .token = "token",
+        .guild_id = "guild-1",
+        .channel_id = "channel-1",
+        .allow_from = &allow_from,
+    }};
+    const config = Config{
+        .workspace_dir = "/tmp",
+        .config_path = "/tmp/config.json",
+        .allocator = std.testing.allocator,
+        .channels = .{ .discord = &discord },
+    };
+    const message = bus_mod.InboundMessage{
+        .channel = "discord",
+        .sender_id = "user-1",
+        .chat_id = "discord:vee:channel:channel-1",
+        .content = "hello",
+        .session_key = "discord:vee:channel:channel-1",
+    };
+    const metadata = channel_adapters.InboundMetadata{
+        .is_dm = false,
+        .guild_id = "guild-1",
+        .channel_id = "channel-1",
+        .thread_id = "channel-1",
+        .message_id = "message-1",
+    };
+    try std.testing.expect(veeIngressForMessage(&config, &message, metadata) != null);
 }
