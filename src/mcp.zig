@@ -32,8 +32,14 @@ pub const VeeIngress = struct {
 
 threadlocal var tls_vee_ingress: ?VeeIngress = null;
 
-pub fn setVeeIngressContext(ingress: ?VeeIngress) void {
+pub fn setVeeIngressContext(ingress: ?VeeIngress) ?VeeIngress {
+    const previous = tls_vee_ingress;
     tls_vee_ingress = ingress;
+    return previous;
+}
+
+pub fn currentVeeIngressContext() ?VeeIngress {
+    return tls_vee_ingress;
 }
 
 pub fn hasVeeIngressServer(configs: []const McpServerConfig) bool {

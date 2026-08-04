@@ -86,6 +86,33 @@ pub fn threadMemorySessionId() ?[]const u8 {
     return tls_memory_session_id;
 }
 
+/// Install the validated per-turn Vee identity immediately around tool calls.
+/// The model never supplies these fields; they originate in the inbound
+/// channel adapter and are carried by the agent conversation context.
+pub fn setVeeIngressContext(
+    guild_id: ?[]const u8,
+    channel_id: ?[]const u8,
+    thread_id: ?[]const u8,
+    sender_id: ?[]const u8,
+    message_id: ?[]const u8,
+) ?mcp_mod.VeeIngress {
+    const ingress = if (guild_id != null and channel_id != null and thread_id != null and sender_id != null and message_id != null)
+        mcp_mod.VeeIngress{
+            .guild_id = guild_id.?,
+            .channel_id = channel_id.?,
+            .thread_id = thread_id.?,
+            .sender_id = sender_id.?,
+            .message_id = message_id.?,
+        }
+    else
+        null;
+    return mcp_mod.setVeeIngressContext(ingress);
+}
+
+pub fn restoreVeeIngressContext(previous: ?mcp_mod.VeeIngress) void {
+    _ = mcp_mod.setVeeIngressContext(previous);
+}
+
 // Sub-modules
 pub const shell = @import("shell.zig");
 pub const file_read = @import("file_read.zig");

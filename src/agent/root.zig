@@ -18,6 +18,7 @@ const ContentPart = providers.ContentPart;
 const ToolSpec = providers.ToolSpec;
 const redaction = @import("../redaction.zig");
 const tools_mod = @import("../tools/root.zig");
+const mcp_mod = @import("../mcp.zig");
 const Tool = tools_mod.Tool;
 const memory_mod = @import("../memory/root.zig");
 const Memory = memory_mod.Memory;
@@ -3123,6 +3124,17 @@ pub const Agent = struct {
                 defer @import("../http_util.zig").setThreadInterruptFlag(null);
                 const previous_memory_session_id = tools_mod.setThreadMemorySessionId(self.memory_session_id);
                 defer _ = tools_mod.setThreadMemorySessionId(previous_memory_session_id);
+                const previous_vee_ingress = if (self.conversation_context) |context|
+                    tools_mod.setVeeIngressContext(
+                        context.vee_guild_id,
+                        context.vee_channel_id,
+                        context.vee_thread_id,
+                        context.sender_id,
+                        context.vee_message_id,
+                    )
+                else
+                    tools_mod.setVeeIngressContext(null, null, null, null, null);
+                defer tools_mod.restoreVeeIngressContext(previous_vee_ingress);
                 const result = t.execute(tool_allocator, args) catch |err| {
                     if (verbose_mod.isVerbose()) {
                         log.info("tool result: name={s} error={s}", .{ call.name, @errorName(err) });
@@ -11315,6 +11327,56 @@ test "Agent.redactMessagesForProvider preserves safe image URLs" {
     try std.testing.expectEqual(@as(usize, 1), out_parts.len);
     try std.testing.expect(std.meta.activeTag(out_parts[0]) == .image_url);
     try std.testing.expectEqualStrings("https://cdn.example.com/public/cat.png", out_parts[0].image_url.url);
+}
+
+test "Agent.executeTool installs trusted Vee ingress context" {
+    const CaptureTool = struct {
+        const Self = @This();
+        seen: ?mcp_mod.VeeIngress = null,
+        pub const tool_name = "capture_vee_ingress";
+        pub const tool_description = "Captures the trusted Vee ingress context.";
+        pub const tool_params = "{\"type\":\"object\",\"additionalProperties\":false}";
+        pub const vtable = tools_mod.ToolVTable(Self);
+
+        pub fn tool(self: *Self) Tool {
+            return .{ .ptr = @ptrCast(self), .vtable = &vtable };
+        }
+
+        pub fn execute(self: *Self, allocator: std.mem.Allocator, _: tools_mod.JsonObjectMap) !tools_mod.ToolResult {
+            self.seen = mcp_mod.currentVeeIngressContext();
+            return .{ .success = true, .output = try allocator.dupe(u8, "captured") };
+        }
+    };
+
+    const allocator = std.testing.allocator;
+    var tool_state = CaptureTool{};
+    const tool = tool_state.tool();
+    var cfg = redactionBaseConfig(allocator);
+    var noop = observability.NoopObserver{};
+    var agent = try Agent.fromConfigWithProfile(allocator, &cfg, undefined, &.{tool}, null, noop.observer(), null);
+    defer agent.deinit();
+    agent.conversation_context = .{
+        .sender_id = "252625615696560140",
+        .vee_guild_id = "1455334101958525009",
+        .vee_channel_id = "1534232938340683947",
+        .vee_thread_id = "1534232938340683947",
+        .vee_message_id = "1534272818374770728",
+    };
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const result = agent.executeTool(arena.allocator(), .{
+        .name = "capture_vee_ingress",
+        .arguments_json = "{}",
+        .tool_call_id = "call-vee-ingress",
+    });
+    try std.testing.expect(result.success);
+    try std.testing.expect(tool_state.seen != null);
+    try std.testing.expectEqualStrings("1455334101958525009", tool_state.seen.?.guild_id);
+    try std.testing.expectEqualStrings("1534232938340683947", tool_state.seen.?.channel_id);
+    try std.testing.expectEqualStrings("1534232938340683947", tool_state.seen.?.thread_id);
+    try std.testing.expectEqualStrings("252625615696560140", tool_state.seen.?.sender_id);
+    try std.testing.expectEqualStrings("1534272818374770728", tool_state.seen.?.message_id);
 }
 
 test "Agent.executeTool does not rehydrate redactor placeholders in tool args" {

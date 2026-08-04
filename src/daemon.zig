@@ -1317,6 +1317,16 @@ fn processInboundMessage(
     var routing_plan = buildInboundRoutingPlan(allocator, runtime.config, msg, parsed_meta.fields);
     defer routing_plan.deinit(allocator);
 
+    if (mcp.hasVeeIngressServer(runtime.config.mcp_servers)) {
+        const ingress = veeIngressForMessage(runtime.config, msg, parsed_meta.fields) orelse return;
+        if (routing_plan.conversation_context) |*context| {
+            context.vee_guild_id = ingress.guild_id;
+            context.vee_channel_id = ingress.channel_id;
+            context.vee_thread_id = ingress.thread_id;
+            context.vee_message_id = ingress.message_id;
+        } else return;
+    }
+
     const outbound_channel = resolveOutboundChannel(registry, routing_plan.outbound_channel, routing_plan.outbound_account_id);
     if (outbound_channel) |channel| {
         markInboundMessageRead(channel, buildInboundMessageRef(msg, parsed_meta.fields));
@@ -1370,12 +1380,6 @@ fn processInboundMessage(
     if (std.mem.eql(u8, msg.channel, "max")) {
         channels_mod.max.setInteractiveOwnerContext(msg.sender_id);
         defer channels_mod.max.setInteractiveOwnerContext(null);
-    }
-
-    if (mcp.hasVeeIngressServer(runtime.config.mcp_servers)) {
-        const ingress = veeIngressForMessage(runtime.config, msg, parsed_meta.fields) orelse return;
-        mcp.setVeeIngressContext(ingress);
-        defer mcp.setVeeIngressContext(null);
     }
 
     const reply = runtime.session_mgr.processMessageStreaming(
