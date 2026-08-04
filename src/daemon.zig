@@ -733,7 +733,6 @@ fn veeIngressForMessage(
         !validVeeIngressText(message_id) or
         !std.mem.eql(u8, guild_id, expected_guild_id) or
         !std.mem.eql(u8, channel_id, expected_channel_id) or
-        !std.mem.eql(u8, msg.chat_id, expected_channel_id) or
         !std.mem.eql(u8, thread_id, expected_channel_id) or
         !std.mem.eql(u8, msg.sender_id, discord_cfg.allow_from[0]))
     {
@@ -3660,4 +3659,35 @@ test "markError records AddressInUse for gateway component" {
     try std.testing.expect(!state.components[0].?.running);
     try std.testing.expectEqual(@as(u64, 1), state.components[0].?.restart_count);
     try std.testing.expectEqualStrings("AddressInUse", state.components[0].?.last_error.?);
+}
+
+test "Vee ingress accepts Discord session chat key" {
+    const allow_from = [_][]const u8{"user-1"};
+    const discord = [_]@import("config_types.zig").DiscordConfig{.{
+        .token = "token",
+        .guild_id = "guild-1",
+        .channel_id = "channel-1",
+        .allow_from = &allow_from,
+    }};
+    const config = Config{
+        .workspace_dir = "/tmp",
+        .config_path = "/tmp/config.json",
+        .allocator = std.testing.allocator,
+        .channels = .{ .discord = &discord },
+    };
+    const message = bus_mod.InboundMessage{
+        .channel = "discord",
+        .sender_id = "user-1",
+        .chat_id = "discord:vee:channel:channel-1",
+        .content = "hello",
+        .session_key = "discord:vee:channel:channel-1",
+    };
+    const metadata = channel_adapters.InboundMetadata{
+        .is_dm = false,
+        .guild_id = "guild-1",
+        .channel_id = "channel-1",
+        .thread_id = "channel-1",
+        .message_id = "message-1",
+    };
+    try std.testing.expect(veeIngressForMessage(&config, &message, metadata) != null);
 }
