@@ -27,6 +27,7 @@ const heartbeat_mod = @import("heartbeat.zig");
 const inbound_debounce = @import("inbound_debounce.zig");
 const interaction_choices = @import("interactions/choices.zig");
 const memory_mod = @import("memory/root.zig");
+const mcp = @import("mcp.zig");
 const outbound = @import("outbound.zig");
 const bootstrap_mod = @import("bootstrap/root.zig");
 const onboard = @import("onboard.zig");
@@ -706,6 +707,47 @@ fn parseInboundMetadata(allocator: std.mem.Allocator, metadata_json: ?[]const u8
     return parsed;
 }
 
+fn validVeeIngressText(value: []const u8) bool {
+    return value.len > 0 and value.len <= 256 and std.mem.indexOfAny(u8, value, "\r\n") == null;
+}
+
+fn veeIngressForMessage(
+    config: *const Config,
+    msg: *const bus_mod.InboundMessage,
+    meta: channel_adapters.InboundMetadata,
+) ?mcp.VeeIngress {
+    if (!std.mem.eql(u8, msg.channel, "discord") or (meta.is_dm orelse true)) return null;
+    if (config.channels.discord.len != 1) return null;
+    const discord_cfg = config.channels.discord[0];
+    const expected_guild_id = discord_cfg.guild_id orelse return null;
+    const expected_channel_id = discord_cfg.channel_id orelse return null;
+    if (discord_cfg.allow_from.len != 1 or std.mem.eql(u8, discord_cfg.allow_from[0], "*")) return null;
+    const guild_id = meta.guild_id orelse return null;
+    const channel_id = meta.channel_id orelse return null;
+    const thread_id = meta.thread_id orelse return null;
+    const message_id = meta.message_id orelse return null;
+    if (!validVeeIngressText(guild_id) or
+        !validVeeIngressText(channel_id) or
+        !validVeeIngressText(thread_id) or
+        !validVeeIngressText(msg.sender_id) or
+        !validVeeIngressText(message_id) or
+        !std.mem.eql(u8, guild_id, expected_guild_id) or
+        !std.mem.eql(u8, channel_id, expected_channel_id) or
+        !std.mem.eql(u8, msg.chat_id, expected_channel_id) or
+        !std.mem.eql(u8, thread_id, expected_channel_id) or
+        !std.mem.eql(u8, msg.sender_id, discord_cfg.allow_from[0]))
+    {
+        return null;
+    }
+    return .{
+        .guild_id = guild_id,
+        .channel_id = channel_id,
+        .thread_id = thread_id,
+        .sender_id = msg.sender_id,
+        .message_id = message_id,
+    };
+}
+
 fn buildInboundConversationContext(
     msg: *const bus_mod.InboundMessage,
     meta: channel_adapters.InboundMetadata,
@@ -1328,6 +1370,12 @@ fn processInboundMessage(
     if (std.mem.eql(u8, msg.channel, "max")) {
         channels_mod.max.setInteractiveOwnerContext(msg.sender_id);
         defer channels_mod.max.setInteractiveOwnerContext(null);
+    }
+
+    if (mcp.hasVeeIngressServer(runtime.config.mcp_servers)) {
+        const ingress = veeIngressForMessage(runtime.config, msg, parsed_meta.fields) orelse return;
+        mcp.setVeeIngressContext(ingress);
+        defer mcp.setVeeIngressContext(null);
     }
 
     const reply = runtime.session_mgr.processMessageStreaming(

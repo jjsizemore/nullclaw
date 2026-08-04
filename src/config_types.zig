@@ -608,6 +608,8 @@ pub const DiscordConfig = struct {
     account_id: []const u8 = "default",
     token: []const u8,
     guild_id: ?[]const u8 = null,
+    /// When set, this account is a Vee ingress and accepts only this guild text channel.
+    channel_id: ?[]const u8 = null,
     allow_bots: bool = false,
     allow_from: []const []const u8 = &.{},
     require_mention: bool = false,
@@ -1851,6 +1853,8 @@ pub const McpServerConfig = struct {
     args: []const []const u8 = &.{},
     env: []const McpEnvEntry = &.{},
     headers: []const McpHeaderEntry = &.{},
+    /// Mode-0600 shared proof used only by Vee's trusted Discord ingress MCP bridge.
+    vee_ingress_proof_file: ?[]const u8 = null,
 
     pub const McpEnvEntry = struct {
         key: []const u8,

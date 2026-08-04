@@ -1553,6 +1553,7 @@ pub const Config = struct {
         InvalidMcpHttpUrl,
         InvalidMcpHeader,
         InvalidMcpTimeoutMs,
+        InvalidVeeIngressConfig,
         InvalidExternalRuntimeName,
         ConflictingExternalRuntimeName,
         MissingExternalTransportCommand,
@@ -1713,6 +1714,31 @@ pub const Config = struct {
                 }
             }
         }
+        var vee_mcp_count: usize = 0;
+        for (self.mcp_servers) |mcp_cfg| {
+            if (mcp_cfg.vee_ingress_proof_file) |proof_file| {
+                if (std.mem.trim(u8, proof_file, " \t\r\n").len == 0) {
+                    return ValidationError.InvalidVeeIngressConfig;
+                }
+                vee_mcp_count += 1;
+            }
+        }
+        if (vee_mcp_count > 0) {
+            if (vee_mcp_count != 1 or self.channels.discord.len != 1) {
+                return ValidationError.InvalidVeeIngressConfig;
+            }
+            const discord_cfg = self.channels.discord[0];
+            const guild_id = discord_cfg.guild_id orelse return ValidationError.InvalidVeeIngressConfig;
+            const channel_id = discord_cfg.channel_id orelse return ValidationError.InvalidVeeIngressConfig;
+            if (std.mem.trim(u8, guild_id, " \t\r\n").len == 0 or
+                std.mem.trim(u8, channel_id, " \t\r\n").len == 0 or
+                discord_cfg.allow_from.len != 1 or
+                std.mem.eql(u8, discord_cfg.allow_from[0], "*") or
+                std.mem.trim(u8, discord_cfg.allow_from[0], " \t\r\n").len == 0)
+            {
+                return ValidationError.InvalidVeeIngressConfig;
+            }
+        }
         for (self.channels.external, 0..) |external_cfg, index| {
             if (!config_types.ExternalChannelConfig.isValidRuntimeName(external_cfg.runtime_name)) {
                 return ValidationError.InvalidExternalRuntimeName;
@@ -1857,6 +1883,7 @@ pub const Config = struct {
             ValidationError.InvalidWebRelayTokenTtl => std.debug.print("Config error: channels.web.accounts.<id>.relay_token_ttl_secs must be in [3600, 31536000].\n", .{}),
             ValidationError.ReservedMainAgentName => std.debug.print("Config error: agents.list names must not normalize to 'main' because that id is reserved for the root agent.\n", .{}),
             ValidationError.UnknownAgentProvider => std.debug.print("Config error: agents.list[].provider must match a known provider name.\n", .{}),
+            ValidationError.InvalidVeeIngressConfig => std.debug.print("Config error: Vee ingress requires one Discord account with an exact guild, channel, and allowed user plus a private proof file.\n", .{}),
         }
     }
 
@@ -3579,6 +3606,29 @@ test "validation accepts mcp http transport config" {
         .mcp_servers = &mcp_servers,
     };
     try cfg.validate();
+}
+
+test "validation rejects Vee ingress without an exact Discord channel" {
+    const discord_accounts = [_]DiscordConfig{.{
+        .token = "test-token",
+        .guild_id = "guild-1",
+        .allow_from = &.{"user-1"},
+    }};
+    const mcp_servers = [_]McpServerConfig{.{
+        .name = "vee",
+        .command = "vee-chat-mcp",
+        .vee_ingress_proof_file = "/run/secrets/vee-proof",
+    }};
+    const cfg = Config{
+        .workspace_dir = "/tmp/yc",
+        .config_path = "/tmp/yc/config.json",
+        .default_model = "x",
+        .allocator = std.testing.allocator,
+        .channels = .{ .discord = &discord_accounts },
+        .mcp_servers = &mcp_servers,
+    };
+
+    try std.testing.expectError(Config.ValidationError.InvalidVeeIngressConfig, cfg.validate());
 }
 
 test "validation rejects mcp http transport without url" {
