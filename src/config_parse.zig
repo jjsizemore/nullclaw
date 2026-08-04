@@ -1430,6 +1430,12 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
                     }
                 }
 
+                if (val.object.get("vee_ingress_proof_file")) |proof_file| {
+                    if (proof_file == .string) {
+                        mcp_cfg.vee_ingress_proof_file = try self.allocator.dupe(u8, proof_file.string);
+                    }
+                }
+
                 // args: string array
                 if (val.object.get("args")) |a| {
                     if (a == .array) mcp_cfg.args = try parseStringArray(self.allocator, a.array);

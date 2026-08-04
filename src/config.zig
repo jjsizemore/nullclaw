@@ -887,6 +887,15 @@ pub const Config = struct {
                 try writePrettyField(self.allocator, w, "      ", "url", url, "");
                 wrote_field = true;
             }
+            if (server.vee_ingress_proof_file) |proof_file| {
+                if (wrote_field) {
+                    try w.writeAll(",\n");
+                } else {
+                    try w.writeAll("\n");
+                }
+                try writePrettyField(self.allocator, w, "      ", "vee_ingress_proof_file", proof_file, "");
+                wrote_field = true;
+            }
             if (server.timeout_ms != 10_000) {
                 if (wrote_field) {
                     try w.writeAll(",\n");
@@ -2687,6 +2696,7 @@ test "save roundtrip preserves extended config sections" {
         .{
             .name = "context7",
             .command = "npx",
+            .vee_ingress_proof_file = "/tmp/vee-ingress-proof",
             .args = &.{
                 "-y",
                 "@upstash/context7-mcp",
@@ -2852,6 +2862,7 @@ test "save roundtrip preserves extended config sections" {
     try std.testing.expectEqual(@as(usize, 1), loaded.mcp_servers.len);
     try std.testing.expectEqualStrings("context7", loaded.mcp_servers[0].name);
     try std.testing.expectEqualStrings("stdio", loaded.mcp_servers[0].transport);
+    try std.testing.expectEqualStrings("/tmp/vee-ingress-proof", loaded.mcp_servers[0].vee_ingress_proof_file.?);
     try std.testing.expectEqual(@as(usize, 2), loaded.mcp_servers[0].args.len);
     try std.testing.expectEqual(@as(usize, 1), loaded.mcp_servers[0].env.len);
     try std.testing.expectEqualStrings("OPENROUTER_API_KEY", loaded.mcp_servers[0].env[0].key);
