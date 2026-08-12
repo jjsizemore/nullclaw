@@ -136,6 +136,7 @@ pub const ConversationContext = struct {
     vee_channel_id: ?[]const u8 = null,
     vee_thread_id: ?[]const u8 = null,
     vee_message_id: ?[]const u8 = null,
+    vee_role_ids: ?[]const []const u8 = null,
 
     /// Compute a hash fingerprint of sender-identifying fields so the system
     /// prompt can be rebuilt when the *sender* changes, not just when context
@@ -171,6 +172,10 @@ pub fn buildConversationContext(args: ConversationContext) ?ConversationContext 
     const vee_channel_id = normalizeOptionalString(args.vee_channel_id);
     const vee_thread_id = normalizeOptionalString(args.vee_thread_id);
     const vee_message_id = normalizeOptionalString(args.vee_message_id);
+    const vee_role_ids = if (args.vee_role_ids) |role_ids|
+        if (role_ids.len > 0) role_ids else null
+    else
+        null;
     const is_group = args.is_group;
     const group_id = if (normalizeOptionalString(args.group_id)) |value|
         value
@@ -202,6 +207,7 @@ pub fn buildConversationContext(args: ConversationContext) ?ConversationContext 
         .vee_channel_id = vee_channel_id,
         .vee_thread_id = vee_thread_id,
         .vee_message_id = vee_message_id,
+        .vee_role_ids = vee_role_ids,
         .peer_id = peer_id,
         .group_id = group_id,
         .is_group = is_group,

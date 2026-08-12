@@ -642,8 +642,10 @@ pub const DiscordConfig = struct {
     account_id: []const u8 = "default",
     token: []const u8,
     guild_id: ?[]const u8 = null,
-    /// When set, this account is a Vee ingress and accepts only this guild text channel.
+    /// When set, this account is a Vee ingress for any eligible guild channel.
     channel_id: ?[]const u8 = null,
+    /// Vee role mode requires this role in every guild message's member.roles.
+    access_role_id: ?[]const u8 = null,
     allow_bots: bool = false,
     allow_from: []const []const u8 = &.{},
     require_mention: bool = false,

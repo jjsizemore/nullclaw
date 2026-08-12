@@ -24,6 +24,7 @@ pub const McpServerConfig = config_mod.McpServerConfig;
 
 pub const VeeIngress = struct {
     guild_id: []const u8,
+    role_ids: []const []const u8 = &.{},
     channel_id: []const u8,
     thread_id: []const u8,
     sender_id: []const u8,
@@ -461,6 +462,13 @@ pub fn parseCallToolResponse(allocator: Allocator, resp: []const u8) ![]const u8
 fn validVeeIngressText(value: []const u8) bool {
     return value.len > 0 and value.len <= 256 and std.mem.indexOfAny(u8, value, "\r\n") == null;
 }
+fn validVeeRoleID(value: []const u8) bool {
+    return validVeeIngressText(value) and std.mem.indexOfScalar(u8, value, ',') == null;
+}
+
+fn lessVeeRoleID(_: void, lhs: []const u8, rhs: []const u8) bool {
+    return std.mem.order(u8, lhs, rhs) == .lt;
+}
 
 fn buildVeeIngressArguments(
     allocator: Allocator,
@@ -481,6 +489,26 @@ fn buildVeeIngressArguments(
         return error.InvalidVeeIngress;
     }
 
+    const role_ids = try allocator.alloc([]const u8, ingress.role_ids.len);
+    defer allocator.free(role_ids);
+    for (ingress.role_ids, 0..) |role_id, index| {
+        if (!validVeeRoleID(role_id)) return error.InvalidVeeIngress;
+        role_ids[index] = role_id;
+    }
+    std.mem.sort([]const u8, role_ids, {}, lessVeeRoleID);
+    if (role_ids.len > 1) {
+        for (role_ids[1..], 1..) |role_id, index| {
+            if (std.mem.eql(u8, role_id, role_ids[index - 1])) return error.InvalidVeeIngress;
+        }
+    }
+
+    var role_ids_csv: std.ArrayListUnmanaged(u8) = .empty;
+    defer role_ids_csv.deinit(allocator);
+    for (role_ids, 0..) |role_id, index| {
+        if (index > 0) try role_ids_csv.append(allocator, ',');
+        try role_ids_csv.appendSlice(allocator, role_id);
+    }
+
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, model_args_json, .{});
     defer parsed.deinit();
     if (parsed.value != .object) return error.InvalidVeeIngressArguments;
@@ -491,21 +519,30 @@ fn buildVeeIngressArguments(
         return error.InvalidVeeIngressArguments;
     }
 
-    const payload = try std.fmt.allocPrint(
-        allocator,
-        "1\ndiscord\nmessage_create\n{s}\n{s}\n{s}\n{s}\n{s}\n{d}\n{s}",
-        .{ ingress.guild_id, ingress.channel_id, ingress.thread_id, ingress.sender_id, ingress.message_id, issued_at, nonce },
-    );
+    const payload = if (role_ids.len > 0)
+        try std.fmt.allocPrint(
+            allocator,
+            "1\ndiscord\nmessage_create\n{s}\n{s}\n{s}\n{s}\n{s}\n{s}\n{d}\n{s}",
+            .{ ingress.guild_id, role_ids_csv.items, ingress.channel_id, ingress.thread_id, ingress.sender_id, ingress.message_id, issued_at, nonce },
+        )
+    else
+        try std.fmt.allocPrint(
+            allocator,
+            "1\ndiscord\nmessage_create\n{s}\n{s}\n{s}\n{s}\n{s}\n{d}\n{s}",
+            .{ ingress.guild_id, ingress.channel_id, ingress.thread_id, ingress.sender_id, ingress.message_id, issued_at, nonce },
+        );
     defer allocator.free(payload);
     const HmacSha256 = std.crypto.auth.hmac.sha2.HmacSha256;
     var mac: [HmacSha256.mac_length]u8 = undefined;
     HmacSha256.create(&mac, payload, proof);
     const signature = std.fmt.bytesToHex(mac, .lower);
+    const role_ids_field: ?[]const []const u8 = if (role_ids.len > 0) role_ids else null;
     const envelope = try std.json.Stringify.valueAlloc(allocator, .{
         .version = @as(i64, 1),
         .provider = "discord",
         .event_type = "message_create",
         .guild_id = ingress.guild_id,
+        .role_ids = role_ids_field,
         .channel_id = ingress.channel_id,
         .thread_id = ingress.thread_id,
         .sender_id = ingress.sender_id,
@@ -513,7 +550,7 @@ fn buildVeeIngressArguments(
         .issued_at = issued_at,
         .nonce = nonce,
         .signature = signature[0..],
-    }, .{});
+    }, .{ .emit_null_optional_fields = false });
     defer allocator.free(envelope);
     const separator: []const u8 = if (clean_args.len == 2) "" else ",";
     return std.fmt.allocPrint(

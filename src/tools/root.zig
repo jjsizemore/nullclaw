@@ -91,6 +91,7 @@ pub fn threadMemorySessionId() ?[]const u8 {
 /// channel adapter and are carried by the agent conversation context.
 pub fn setVeeIngressContext(
     guild_id: ?[]const u8,
+    role_ids: ?[]const []const u8,
     channel_id: ?[]const u8,
     thread_id: ?[]const u8,
     sender_id: ?[]const u8,
@@ -99,6 +100,7 @@ pub fn setVeeIngressContext(
     const ingress = if (guild_id != null and channel_id != null and thread_id != null and sender_id != null and message_id != null)
         mcp_mod.VeeIngress{
             .guild_id = guild_id.?,
+            .role_ids = role_ids orelse &.{},
             .channel_id = channel_id.?,
             .thread_id = thread_id.?,
             .sender_id = sender_id.?,
