@@ -44,6 +44,7 @@ pub const DiscordChannel = struct {
     token: []const u8,
     guild_id: ?[]const u8,
     channel_id: ?[]const u8 = null,
+    access_role_id: ?[]const u8 = null,
     allow_bots: bool,
     account_id: []const u8 = "default",
 
@@ -124,6 +125,7 @@ pub const DiscordChannel = struct {
             .token = cfg.token,
             .guild_id = cfg.guild_id,
             .channel_id = cfg.channel_id,
+            .access_role_id = cfg.access_role_id,
             .allow_bots = cfg.allow_bots,
             .account_id = cfg.account_id,
             .allow_from = cfg.allow_from,
@@ -1299,21 +1301,49 @@ pub const DiscordChannel = struct {
             else => false,
         } else false;
 
-        // A configured channel_id turns this account into the Vee ingress. Its
-        // provenance must be complete before any message reaches a model.
-        if (self.channel_id) |expected_channel_id| {
-            const expected_guild_id = self.guild_id orelse return;
-            if (guild_id == null or message_id == null or channel_type == null or channel_type.? != 0) return;
-            if (self.allow_from.len != 1 or std.mem.eql(u8, self.allow_from[0], "*")) return;
-            if (!std.mem.eql(u8, guild_id.?, expected_guild_id) or
-                !std.mem.eql(u8, channel_id, expected_channel_id) or
-                !std.mem.eql(u8, author_id, self.allow_from[0]) or
-                std.mem.trim(u8, content, " \t\r\n").len == 0)
-            {
-                return;
+        const role_mode = self.access_role_id != null;
+        var verified_role_values: []const std.json.Value = &.{};
+        if (role_mode) {
+            const member_obj = if (d_obj.get("member")) |v| switch (v) {
+                .object => |o| o,
+                else => return,
+            } else return;
+            const roles_val = member_obj.get("roles") orelse return;
+            if (roles_val != .array or roles_val.array.items.len == 0) return;
+            verified_role_values = roles_val.array.items;
+            var access_role_present = false;
+            for (verified_role_values) |role| {
+                if (role == .string and std.mem.eql(u8, role.string, self.access_role_id.?)) {
+                    access_role_present = true;
+                    break;
+                }
             }
+            if (!access_role_present) return;
+        }
+
+        // A configured channel or access role turns this account into the Vee
+        // ingress. Its provenance must be complete before any model dispatch.
+        if (self.channel_id != null or role_mode) {
+            const expected_guild_id = self.guild_id orelse return;
+            if (guild_id == null or message_id == null or channel_type == null) return;
+            if (std.mem.trim(u8, content, " \t\r\n").len == 0) return;
+            if (!std.mem.eql(u8, guild_id.?, expected_guild_id)) return;
             if (d_obj.get("attachments")) |attachments| {
                 if (attachments == .array and attachments.array.items.len != 0) return;
+            }
+            if (role_mode) {
+                const kind = channel_type.?;
+                if (kind != 0 and kind != 10 and kind != 11 and kind != 12) return;
+            } else {
+                const expected_channel_id = self.channel_id orelse return;
+                if (channel_type.? != 0 or
+                    self.allow_from.len != 1 or
+                    std.mem.eql(u8, self.allow_from[0], "*") or
+                    !std.mem.eql(u8, channel_id, expected_channel_id) or
+                    !std.mem.eql(u8, author_id, self.allow_from[0]))
+                {
+                    return;
+                }
             }
         }
 
@@ -1330,8 +1360,9 @@ pub const DiscordChannel = struct {
             }
         }
 
-        // Filter 3: allow_from allowlist
-        if (!root.isAllowedScoped("discord channel", self.allow_from, author_id)) {
+        // Filter 3: legacy allow_from allowlist. Role mode uses the verified
+        // member.roles claim and the bridge's live member-role lookup instead.
+        if (!role_mode and !root.isAllowedScoped("discord channel", self.allow_from, author_id)) {
             return;
         }
 
@@ -1407,7 +1438,18 @@ pub const DiscordChannel = struct {
             try mw.writeAll(",\"guild_id\":");
             try root.appendJsonStringW(mw, gid);
         }
-        if (self.channel_id != null) {
+        if (role_mode) {
+            try mw.writeAll(",\"access_role_id\":");
+            try root.appendJsonStringW(mw, self.access_role_id.?);
+            try mw.writeAll(",\"role_ids\":[");
+            for (verified_role_values, 0..) |role, index| {
+                if (index > 0) try mw.writeByte(',');
+                if (role != .string) return;
+                try root.appendJsonStringW(mw, role.string);
+            }
+            try mw.writeByte(']');
+        }
+        if (self.channel_id != null or role_mode) {
             const trusted_message_id = message_id orelse return;
             try mw.writeAll(",\"channel_id\":");
             try root.appendJsonStringW(mw, channel_id);
@@ -1452,7 +1494,7 @@ pub const DiscordChannel = struct {
     fn handleInteractionCreate(self: *DiscordChannel, root_val: std.json.Value) !void {
         // Vee accepts only text MESSAGE_CREATE events. Buttons/components cannot
         // acquire a trusted ingress envelope.
-        if (self.channel_id != null) return;
+        if (self.channel_id != null or self.access_role_id != null) return;
         if (root_val != .object) return;
         const d_val = root_val.object.get("d") orelse return;
         const d_obj = switch (d_val) {

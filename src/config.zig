@@ -1739,14 +1739,24 @@ pub const Config = struct {
             }
             const discord_cfg = self.channels.discord[0];
             const guild_id = discord_cfg.guild_id orelse return ValidationError.InvalidVeeIngressConfig;
-            const channel_id = discord_cfg.channel_id orelse return ValidationError.InvalidVeeIngressConfig;
-            if (std.mem.trim(u8, guild_id, " \t\r\n").len == 0 or
-                std.mem.trim(u8, channel_id, " \t\r\n").len == 0 or
-                discord_cfg.allow_from.len != 1 or
-                std.mem.eql(u8, discord_cfg.allow_from[0], "*") or
-                std.mem.trim(u8, discord_cfg.allow_from[0], " \t\r\n").len == 0)
-            {
+            if (std.mem.trim(u8, guild_id, " \t\r\n").len == 0) {
                 return ValidationError.InvalidVeeIngressConfig;
+            }
+            if (discord_cfg.access_role_id) |role_id| {
+                if (std.mem.trim(u8, role_id, " \t\r\n").len == 0 or
+                    std.mem.eql(u8, role_id, "*"))
+                {
+                    return ValidationError.InvalidVeeIngressConfig;
+                }
+            } else {
+                const channel_id = discord_cfg.channel_id orelse return ValidationError.InvalidVeeIngressConfig;
+                if (std.mem.trim(u8, channel_id, " \t\r\n").len == 0 or
+                    discord_cfg.allow_from.len != 1 or
+                    std.mem.eql(u8, discord_cfg.allow_from[0], "*") or
+                    std.mem.trim(u8, discord_cfg.allow_from[0], " \t\r\n").len == 0)
+                {
+                    return ValidationError.InvalidVeeIngressConfig;
+                }
             }
         }
         for (self.channels.external, 0..) |external_cfg, index| {
@@ -1883,7 +1893,7 @@ pub const Config = struct {
             ValidationError.InvalidTelegramWebhookSecret => std.debug.print("Config error: channels.telegram.accounts.<id>.webhook_secret must be 16-128 printable chars without whitespace when provided.\n", .{}),
             ValidationError.InvalidTeamsWebhookSecret => std.debug.print("Config error: channels.teams.accounts.<id>.webhook_secret must be 16-128 printable chars without whitespace when provided.\n", .{}),
             ValidationError.InvalidWebMessageAuthMode => std.debug.print("Config error: channels.web.accounts.<id>.message_auth_mode must be 'pairing' or 'token'.\n", .{}),
-            ValidationError.InvalidWebMessageAuthTransport => std.debug.print("Config error: channels.web.accounts.<id>.message_auth_mode='token' is supported only when transport='local'.\n", .{}),
+            ValidationError.InvalidVeeIngressConfig => std.debug.print("Config error: Vee ingress requires one Discord account with an exact guild and either a configured access role or an exact channel and allowed user plus a private proof file.\n", .{}),
             ValidationError.InvalidWebOrigin => std.debug.print("Config error: channels.web.accounts.<id>.allowed_origins entries must be '*', 'null', or absolute origins (scheme://...).\n", .{}),
             ValidationError.MissingWebRelayUrl => std.debug.print("Config error: channels.web.accounts.<id>.relay_url is required when transport='relay'.\n", .{}),
             ValidationError.InvalidWebRelayUrl => std.debug.print("Config error: channels.web.accounts.<id>.relay_url must be an absolute wss:// URL.\n", .{}),
@@ -1893,7 +1903,7 @@ pub const Config = struct {
             ValidationError.InvalidWebRelayTokenTtl => std.debug.print("Config error: channels.web.accounts.<id>.relay_token_ttl_secs must be in [3600, 31536000].\n", .{}),
             ValidationError.ReservedMainAgentName => std.debug.print("Config error: agents.list names must not normalize to 'main' because that id is reserved for the root agent.\n", .{}),
             ValidationError.UnknownAgentProvider => std.debug.print("Config error: agents.list[].provider must match a known provider name.\n", .{}),
-            ValidationError.InvalidVeeIngressConfig => std.debug.print("Config error: Vee ingress requires one Discord account with an exact guild, channel, and allowed user plus a private proof file.\n", .{}),
+            ValidationError.InvalidWebMessageAuthTransport => std.debug.print("Config error: channels.web.accounts.<id>.message_auth_mode='token' is supported only when transport='local'.\n", .{}),
         }
     }
 

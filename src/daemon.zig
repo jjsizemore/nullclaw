@@ -662,8 +662,13 @@ fn channelSupervisorThread(
 const ParsedInboundMetadata = struct {
     parsed: ?std.json.Parsed(std.json.Value) = null,
     fields: channel_adapters.InboundMetadata = .{},
+    role_ids_storage: []const []const u8 = &.{},
+    allocator: ?std.mem.Allocator = null,
 
     fn deinit(self: *ParsedInboundMetadata) void {
+        if (self.role_ids_storage.len > 0) {
+            self.allocator.?.free(self.role_ids_storage);
+        }
         if (self.parsed) |*pm| pm.deinit();
     }
 };
@@ -671,6 +676,7 @@ const ParsedInboundMetadata = struct {
 fn parseInboundMetadata(allocator: std.mem.Allocator, metadata_json: ?[]const u8) ParsedInboundMetadata {
     var parsed = ParsedInboundMetadata{};
     const meta_json = metadata_json orelse return parsed;
+    parsed.allocator = allocator;
 
     parsed.parsed = std.json.parseFromSlice(std.json.Value, allocator, meta_json, .{}) catch null;
     if (parsed.parsed) |*pm| {
@@ -693,6 +699,30 @@ fn parseInboundMetadata(allocator: std.mem.Allocator, metadata_json: ?[]const u8
         }
         if (pm.value.object.get("guild_id")) |v| {
             if (v == .string) parsed.fields.guild_id = v.string;
+        }
+        if (pm.value.object.get("access_role_id")) |v| {
+            if (v == .string and v.string.len > 0) parsed.fields.access_role_id = v.string;
+        }
+        if (pm.value.object.get("role_ids")) |v| {
+            if (v == .array and v.array.items.len > 0) {
+                const roles = allocator.alloc([]const u8, v.array.items.len) catch return parsed;
+                for (v.array.items, 0..) |role, index| {
+                    if (role != .string or !validVeeRoleID(role.string)) {
+                        allocator.free(roles);
+                        return parsed;
+                    }
+                    roles[index] = role.string;
+                }
+                std.mem.sort([]const u8, roles, {}, lessVeeRoleID);
+                for (roles[1..], 1..) |role, index| {
+                    if (std.mem.eql(u8, role, roles[index - 1])) {
+                        allocator.free(roles);
+                        return parsed;
+                    }
+                }
+                parsed.role_ids_storage = roles;
+                parsed.fields.role_ids = roles;
+            }
         }
         if (pm.value.object.get("team_id")) |v| {
             if (v == .string) parsed.fields.team_id = v.string;
@@ -725,6 +755,13 @@ fn parseInboundMetadata(allocator: std.mem.Allocator, metadata_json: ?[]const u8
 fn validVeeIngressText(value: []const u8) bool {
     return value.len > 0 and value.len <= 256 and std.mem.indexOfAny(u8, value, "\r\n") == null;
 }
+fn validVeeRoleID(value: []const u8) bool {
+    return validVeeIngressText(value) and std.mem.indexOfScalar(u8, value, ',') == null;
+}
+
+fn lessVeeRoleID(_: void, lhs: []const u8, rhs: []const u8) bool {
+    return std.mem.order(u8, lhs, rhs) == .lt;
+}
 
 fn veeIngressForMessage(
     config: *const Config,
@@ -735,8 +772,7 @@ fn veeIngressForMessage(
     if (config.channels.discord.len != 1) return null;
     const discord_cfg = config.channels.discord[0];
     const expected_guild_id = discord_cfg.guild_id orelse return null;
-    const expected_channel_id = discord_cfg.channel_id orelse return null;
-    if (discord_cfg.allow_from.len != 1 or std.mem.eql(u8, discord_cfg.allow_from[0], "*")) return null;
+    const role_mode = discord_cfg.access_role_id != null;
     const guild_id = meta.guild_id orelse return null;
     const channel_id = meta.channel_id orelse return null;
     const thread_id = meta.thread_id orelse return null;
@@ -747,14 +783,32 @@ fn veeIngressForMessage(
         !validVeeIngressText(msg.sender_id) or
         !validVeeIngressText(message_id) or
         !std.mem.eql(u8, guild_id, expected_guild_id) or
-        !std.mem.eql(u8, channel_id, expected_channel_id) or
-        !std.mem.eql(u8, thread_id, expected_channel_id) or
-        !std.mem.eql(u8, msg.sender_id, discord_cfg.allow_from[0]))
+        !std.mem.eql(u8, thread_id, channel_id))
     {
         return null;
     }
+    if (role_mode) {
+        const role_id = discord_cfg.access_role_id.?;
+        if (meta.role_ids.len == 0) return null;
+        var role_present = false;
+        for (meta.role_ids) |candidate| {
+            if (!validVeeIngressText(candidate)) return null;
+            if (std.mem.eql(u8, candidate, role_id)) role_present = true;
+        }
+        if (!role_present) return null;
+    } else {
+        const expected_channel_id = discord_cfg.channel_id orelse return null;
+        if (discord_cfg.allow_from.len != 1 or std.mem.eql(u8, discord_cfg.allow_from[0], "*") or
+            !std.mem.eql(u8, channel_id, expected_channel_id) or
+            !std.mem.eql(u8, thread_id, expected_channel_id) or
+            !std.mem.eql(u8, msg.sender_id, discord_cfg.allow_from[0]))
+        {
+            return null;
+        }
+    }
     return .{
         .guild_id = guild_id,
+        .role_ids = meta.role_ids,
         .channel_id = channel_id,
         .thread_id = thread_id,
         .sender_id = msg.sender_id,
@@ -800,6 +854,7 @@ fn buildInboundConversationContext(
     return buildConversationContext(.{
         .channel = if (msg.channel.len > 0) msg.channel else null,
         .account_id = meta.account_id,
+        .vee_role_ids = if (meta.role_ids.len > 0) meta.role_ids else null,
         .sender_id = if (msg.sender_id.len > 0) msg.sender_id else null,
         .sender_username = meta.sender_username,
         .sender_display_name = meta.sender_display_name,
@@ -1337,6 +1392,7 @@ fn processInboundMessage(
             context.vee_guild_id = ingress.guild_id;
             context.vee_channel_id = ingress.channel_id;
             context.vee_thread_id = ingress.thread_id;
+            context.vee_role_ids = ingress.role_ids;
             context.vee_message_id = ingress.message_id;
         } else return;
     }

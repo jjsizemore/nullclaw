@@ -3165,13 +3165,14 @@ pub const Agent = struct {
                 const previous_vee_ingress = if (self.conversation_context) |context|
                     tools_mod.setVeeIngressContext(
                         context.vee_guild_id,
+                        context.vee_role_ids,
                         context.vee_channel_id,
                         context.vee_thread_id,
                         context.sender_id,
                         context.vee_message_id,
                     )
                 else
-                    tools_mod.setVeeIngressContext(null, null, null, null, null);
+                    tools_mod.setVeeIngressContext(null, null, null, null, null, null);
                 defer tools_mod.restoreVeeIngressContext(previous_vee_ingress);
                 const result = t.execute(tool_allocator, args) catch |err| {
                     if (verbose_mod.isVerbose()) {
