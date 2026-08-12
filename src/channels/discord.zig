@@ -1325,18 +1325,16 @@ pub const DiscordChannel = struct {
         // ingress. Its provenance must be complete before any model dispatch.
         if (self.channel_id != null or role_mode) {
             const expected_guild_id = self.guild_id orelse return;
-            if (guild_id == null or message_id == null or channel_type == null) return;
+            if (guild_id == null or message_id == null) return;
             if (std.mem.trim(u8, content, " \t\r\n").len == 0) return;
             if (!std.mem.eql(u8, guild_id.?, expected_guild_id)) return;
             if (d_obj.get("attachments")) |attachments| {
                 if (attachments == .array and attachments.array.items.len != 0) return;
             }
-            if (role_mode) {
-                const kind = channel_type.?;
-                if (kind != 0 and kind != 10 and kind != 11 and kind != 12) return;
-            } else {
+            if (!role_mode) {
+                const kind = channel_type orelse return;
                 const expected_channel_id = self.channel_id orelse return;
-                if (channel_type.? != 0 or
+                if (kind != 0 or
                     self.allow_from.len != 1 or
                     std.mem.eql(u8, self.allow_from[0], "*") or
                     !std.mem.eql(u8, channel_id, expected_channel_id) or
